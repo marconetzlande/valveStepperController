@@ -9,15 +9,24 @@
 #include <AccelStepper.h>
 #include <WiFiManager.h>
 
+// Pinmap
 #define S2MINI_LED 15
+#define STEPPER_STEP_PIN 16
+#define STEPPER_DIR_PIN 17
+#define STEPPER_EN_PIN 18
 
+// Stepper Parameter
 #define STEPPER_STEPS_PER_REVELAZION 200
 #define STEPPER_MICROSTEPS 64
-#define STEPPER_GEAR_RATIO 3.75
+
+//#define STEPPER_GEAR_RATIO 3.455 //91/200
+//#define STEPPER_GEAR_RATIO 3.456 //57/125
+#define STEPPER_GEAR_RATIO 3.46    //50/173 //because a 90 dev rev is divisable by 64, its 173 full steps
+
 #define STEPPER_ACCEL 1000
 #define STEPPER_ONE_ROT STEPPER_STEPS_PER_REVELAZION * STEPPER_MICROSTEPS * STEPPER_GEAR_RATIO
-#define STEPPER_MAX_SPEED STEPPER_ONE_ROT / 1.0
-
+#define STEPPER_MAX_SPEED 200.0
+//STEPPER_ONE_ROT / 0.2
 #define STEPPER_INVERT_DIRECTION false
 
 WiFiManager wifiManager; // Create a WiFiManager instance
@@ -28,10 +37,7 @@ const char* mqtt_server = "192.168.181.108";
 const int mqtt_port = 1883;
 
 int stepsPer90Degrees = STEPPER_ONE_ROT / 4;
-
-#define STEPPER_STEP_PIN 16
-#define STEPPER_DIR_PIN 17
-#define STEPPER_EN_PIN 18
+int stepsPer1Degrees = STEPPER_ONE_ROT / 360;
 
 PubSubClient client(espClient);
 AccelStepper stepper(AccelStepper::DRIVER, STEPPER_STEP_PIN, STEPPER_DIR_PIN);
@@ -39,6 +45,7 @@ Preferences preferences;
 
 // Topic variables
 String motorTopic;
+String angleTopic;
 String sleepTopic;
 String movementDoneTopic;
 String bootTopic;
@@ -81,22 +88,29 @@ void callback(char* topic, byte* payload, unsigned int length) {
       int newPosition = String(message).toInt() * stepsPer90Degrees * direction;
       Serial.println("runToPosition " + String(newPosition));
       stepper.moveTo(newPosition);
-      isMoving = stepper.isRunning();
-      if (isMoving) {
-        preferences.putBool("isMoving", true);
-        stepper.enableOutputs();
-      } else {
-        client.publish(movementDoneTopic.c_str(), "1");
-      }
+      
     } else if (String(topic) == calibTopic) {
       // Reset moving state if device crashes during movement.
       preferences.begin("StepperPrefs");
       preferences.putBool("isMoving", false);
       preferences.end();
+
     } else if (String(topic) == sleepTopic) {
       // Send device into deepSleep
       sleepTime = message.toInt() * 1000000;
       Serial.println("Sleep command recieved!");
+
+    } else if (String(topic) == angleTopic) {
+      int newPosition = String(message).toInt() * stepsPer1Degrees;
+      stepper.moveTo(newPosition);
+    }
+
+    isMoving = stepper.isRunning();
+    if (isMoving) {
+      preferences.putBool("isMoving", true);
+      stepper.enableOutputs();
+    } else {
+      client.publish(movementDoneTopic.c_str(), "1");
     }
   }
 }
@@ -125,6 +139,7 @@ void reconnect() {
   while (!client.connected()) {
     if (client.connect(deviceID.c_str())) {
       client.subscribe(motorTopic.c_str());
+      client.subscribe(angleTopic.c_str());
       client.subscribe(sleepTopic.c_str());
       client.subscribe(calibTopic.c_str());
       client.publish(bootTopic.c_str(),"0");
@@ -184,12 +199,12 @@ void setup() {
   String topicPrefix = String("mk_") + deviceID;
   //in
   motorTopic = topicPrefix + "/Motor";
+  angleTopic = topicPrefix + "/Angle";
   sleepTopic = topicPrefix + "/Sleep";
   calibTopic = topicPrefix + "/Calib";
   //out
   movementDoneTopic = topicPrefix + "/Done";
   bootTopic = topicPrefix + "/Boot";
-
 
   if (WiFi.status() == WL_CONNECTED) {
     client.setServer(mqtt_server, mqtt_port);
@@ -203,7 +218,6 @@ void setup() {
 }
 
 bool wasMoving = false;
-
 void loop() {
   if (!client.connected()) {
     reconnect();
