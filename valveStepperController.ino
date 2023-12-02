@@ -8,6 +8,9 @@
 #include <PubSubClient.h>
 #include <AccelStepper.h>
 #include <WiFiManager.h>
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 
 // Pinmap
 #define S2MINI_LED 15
@@ -36,8 +39,8 @@ String deviceID;
 const char* mqtt_server = "192.168.181.108";
 const int mqtt_port = 1883;
 
-int stepsPer90Degrees = STEPPER_ONE_ROT / 4;
-int stepsPer1Degrees = STEPPER_ONE_ROT / 360;
+int stepsPer90Degrees = STEPPER_ONE_ROT  /   4;
+int stepsPer1Degrees  = STEPPER_ONE_ROT  / 360;
 
 PubSubClient client(espClient);
 AccelStepper stepper(AccelStepper::DRIVER, STEPPER_STEP_PIN, STEPPER_DIR_PIN);
@@ -53,6 +56,9 @@ String calibTopic;
 int sleepTime = 0;
 
 bool isMoving = false;
+bool lastDirection = 0;
+
+int direction;
 
 // Callback function: Processes incoming MQTT messages and performs corresponding actions
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -66,7 +72,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     for (unsigned int i = 0; i < length; i++) {
       message += (char)payload[i];
     }
-    
+
     if (String(topic) == motorTopic) {
       Serial.println("Motor command recieved!");
       Serial.println(String(message));
@@ -79,20 +85,17 @@ void callback(char* topic, byte* payload, unsigned int length) {
         return;
       }
       stepper.setCurrentPosition(currentPosition);
-      int direction;
-      if (!STEPPER_INVERT_DIRECTION) {
-        direction = 1;
-      } else {
-        direction = -1;
-      }
+
       int newPosition = String(message).toInt() * stepsPer90Degrees * direction;
       Serial.println("runToPosition " + String(newPosition));
       stepper.moveTo(newPosition);
       
     } else if (String(topic) == calibTopic) {
+      int calibPosition = String(message).toInt() * stepsPer90Degrees * direction;
       // Reset moving state if device crashes during movement.
       preferences.begin("StepperPrefs");
       preferences.putBool("isMoving", false);
+      preferences.putInt("currentPosition", calibPosition);
       preferences.end();
 
     } else if (String(topic) == sleepTopic) {
@@ -101,18 +104,30 @@ void callback(char* topic, byte* payload, unsigned int length) {
       Serial.println("Sleep command recieved!");
 
     } else if (String(topic) == angleTopic) {
-      int newPosition = String(message).toInt() * stepsPer1Degrees;
-      stepper.moveTo(newPosition);
+      int moveRel = String(message).toInt() * STEPPER_MICROSTEPS * 4; //3 full steps
+      stepper.move(moveRel * direction);
     }
 
     isMoving = stepper.isRunning();
     if (isMoving) {
+      int s = stepper.distanceToGo();
+      if (s>0) { lastDirection =  1; } 
+      if (s<0) { lastDirection = -1; }
       preferences.putBool("isMoving", true);
       stepper.enableOutputs();
     } else {
-      client.publish(movementDoneTopic.c_str(), "1");
+      // Report command done
+      client.publish(movementDoneTopic.c_str(), "done");
     }
   }
+}
+
+void stepperUnload() {
+  int d = 0;
+  if (lastDirection == -1) {d =  1;}
+  if (lastDirection ==  1) {d = -1;}
+  stepper.move(d * STEPPER_MICROSTEPS * 2); // teke load from shaft before turning off
+  isMoving = stepper.run();
 }
 
 void stepperDone() {
@@ -129,9 +144,10 @@ void stepperDone() {
   Serial.println("preferences end");
 
   // Report movement done
-  client.publish(movementDoneTopic.c_str(), "1");
+  char msg_out[20];
+  dtostrf(currentPosition / STEPPER_STEPS_PER_REVELAZION / STEPPER_MICROSTEPS / STEPPER_GEAR_RATIO, 2, 2, msg_out);
+  client.publish(movementDoneTopic.c_str(), msg_out);
 }
-
 
 // Reconnect function: Connects to the MQTT server and subscribes to the required topics
 void reconnect() {
@@ -169,6 +185,12 @@ void setup() {
   stepper.disableOutputs();  //Disable stepper on Boot.
   stepper.setMaxSpeed(STEPPER_MAX_SPEED); // Set max speed to 1 RPM
   stepper.setAcceleration(STEPPER_ACCEL);
+
+  if (!STEPPER_INVERT_DIRECTION) {
+    direction = 1;
+  } else {
+    direction = -1;
+  }
 
   //Serial init
   Serial.begin(115200);
@@ -215,17 +237,53 @@ void setup() {
   } else {
     // Here you can perform additional actions if there is no WiFi connection.
   }
+
+  ArduinoOTA
+    .onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH)
+        type = "sketch";
+      else // U_SPIFFS
+        type = "filesystem";
+
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type);
+    })
+    .onEnd([]() {
+      Serial.println("\nEnd");
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+  ArduinoOTA.begin();
 }
 
 bool wasMoving = false;
+bool isUnloading = false;
 void loop() {
+  ArduinoOTA.handle();  
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
   isMoving = stepper.run();
   if (wasMoving && !isMoving) {
-    stepperDone();
+    if (isUnloading) {
+      isUnloading = false;
+      stepperDone();
+    } else {
+      stepperUnload();
+      isUnloading = true;
+    }
   }
   wasMoving = isMoving;
 }
