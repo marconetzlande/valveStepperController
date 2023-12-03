@@ -56,8 +56,7 @@ String calibTopic;
 int sleepTime = 0;
 
 bool isMoving = false;
-bool lastDirection = 0;
-
+int lastDirection = 0;
 int direction;
 
 // Callback function: Processes incoming MQTT messages and performs corresponding actions
@@ -104,15 +103,16 @@ void callback(char* topic, byte* payload, unsigned int length) {
       Serial.println("Sleep command recieved!");
 
     } else if (String(topic) == angleTopic) {
-      int moveRel = String(message).toInt() * STEPPER_MICROSTEPS * 4; //3 full steps
+      int moveRel = String(message).toInt() * STEPPER_MICROSTEPS * 8; //full steps
       stepper.move(moveRel * direction);
     }
 
     isMoving = stepper.isRunning();
     if (isMoving) {
-      int s = stepper.distanceToGo();
-      if (s>0) { lastDirection =  1; } 
-      if (s<0) { lastDirection = -1; }
+      int d = stepper.distanceToGo();
+      Serial.println(d);
+      if (d > 0) { lastDirection =  1; } 
+      if (d < 0) { lastDirection = -1; }
       preferences.putBool("isMoving", true);
       stepper.enableOutputs();
     } else {
@@ -124,10 +124,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 void stepperUnload() {
   int d = 0;
-  if (lastDirection == -1) {d =  1;}
-  if (lastDirection ==  1) {d = -1;}
+  if (lastDirection == -1) { d =  1; }
+  if (lastDirection ==  1) { d = -1; }
   stepper.move(d * STEPPER_MICROSTEPS * 2); // teke load from shaft before turning off
-  isMoving = stepper.run();
+  isMoving = stepper.isRunning();
+  Serial.println(stepper.distanceToGo());
 }
 
 void stepperDone() {
