@@ -24,7 +24,7 @@
 
 //#define STEPPER_GEAR_RATIO 3.455 //91/200
 //#define STEPPER_GEAR_RATIO 3.456 //57/125
-#define STEPPER_GEAR_RATIO 3.46    //50/173 //because a 90 dev reg is divisable by 64, its 173 full steps
+#define STEPPER_GEAR_RATIO 3.46    //50/173 //because a 90 deg rev. is divisable by 64, its 173 full steps
 
 #define STEPPER_ACCEL 1000
 #define STEPPER_ONE_ROT STEPPER_STEPS_PER_REVELAZION * STEPPER_MICROSTEPS * STEPPER_GEAR_RATIO
